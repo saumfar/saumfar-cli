@@ -31,6 +31,7 @@ impl SortColumn {
 
 pub struct App {
     pub view: View,
+    pub searching: bool,
     pub datasets: Vec<Dataset>,
     pub filtered_indices: Vec<usize>,
     pub selected: usize,
@@ -60,6 +61,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             view: View::Browse,
+            searching: false,
             datasets: Vec::new(),
             filtered_indices: Vec::new(),
             selected: 0,

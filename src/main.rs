@@ -89,8 +89,9 @@ async fn cmd_list(
             continue;
         }
         println!(
-            "{:<60} {:<25} {:<12} {}",
+            "{:<55} {:<10} {:<25} {:<12} {}",
             d.title,
+            d.format,
             d.owner,
             d.crs,
             &d.updated[..10.min(d.updated.len())]
@@ -187,23 +188,43 @@ async fn handle_browse_key(
     key: crossterm::event::KeyEvent,
     client: &reqwest::Client,
 ) -> Result<()> {
+    if app.searching {
+        match key.code {
+            KeyCode::Esc => {
+                app.searching = false;
+            }
+            KeyCode::Enter => {
+                app.searching = false;
+            }
+            KeyCode::Backspace => {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    app.clear_search();
+                } else {
+                    app.pop_search_char();
+                }
+            }
+            KeyCode::Up => app.move_selection(-1),
+            KeyCode::Down => app.move_selection(1),
+            KeyCode::Char(c) => app.push_search_char(c),
+            _ => {}
+        }
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('/') => {
+            app.searching = true;
+        }
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
-        KeyCode::Char('g') => {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                app.jump_bottom();
-            } else {
-                app.jump_top();
-            }
-        }
+        KeyCode::Char('g') => app.jump_top(),
+        KeyCode::Char('G') => app.jump_bottom(),
         KeyCode::Home => app.jump_top(),
         KeyCode::End => app.jump_bottom(),
-        KeyCode::Backspace => app.pop_search_char(),
         KeyCode::Esc => app.clear_search(),
         KeyCode::Char('R') => {
             app.loading = true;
@@ -237,7 +258,6 @@ async fn handle_browse_key(
                 }
             }
         }
-        KeyCode::Char(c) => app.push_search_char(c),
         _ => {}
     }
     Ok(())
@@ -260,13 +280,8 @@ async fn handle_detail_key(
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
-        KeyCode::Char('g') => {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                app.jump_bottom();
-            } else {
-                app.jump_top();
-            }
-        }
+        KeyCode::Char('g') => app.jump_top(),
+        KeyCode::Char('G') => app.jump_bottom(),
         KeyCode::Home => app.jump_top(),
         KeyCode::End => app.jump_bottom(),
         KeyCode::Char(' ') => {

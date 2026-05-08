@@ -42,17 +42,22 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
-    let search_text = if app.search_query.is_empty() {
-        Line::from(vec![
-            Span::styled(" / ", Style::default().fg(Color::DarkGray)),
-            Span::styled("search datasets…", Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
+    let search_text = if app.searching {
         Line::from(vec![
             Span::styled(" / ", Style::default().fg(Color::Yellow)),
             Span::raw(&app.search_query),
             Span::styled("▎", Style::default().fg(Color::Yellow)),
         ])
+    } else if !app.search_query.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&app.search_query, Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            " / search",
+            Style::default().fg(Color::DarkGray),
+        ))
     };
     f.render_widget(Paragraph::new(search_text), area);
 }
@@ -65,21 +70,23 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let header_cells = [
+    let sortable = [
         ("Title", SortColumn::Title),
+        ("Fmt", SortColumn::Crs), // not sortable, just a placeholder
         ("Owner", SortColumn::Owner),
         ("CRS", SortColumn::Crs),
         ("Updated", SortColumn::Updated),
-    ]
-    .map(|(label, col)| {
-        let style = if app.sort_column == col {
+    ];
+    let header_cells = sortable.map(|(label, col)| {
+        let is_active = app.sort_column == col && label != "Fmt";
+        let style = if is_active {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let arrow = if app.sort_column == col {
+        let arrow = if is_active {
             if app.sort_ascending { " ▲" } else { " ▼" }
         } else {
             ""
@@ -95,6 +102,8 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
             let d = &app.datasets[i];
             Row::new([
                 Cell::from(d.title.as_str()),
+                Cell::from(d.format.as_str())
+                    .style(Style::default().fg(browse_format_color(&d.format))),
                 Cell::from(d.owner.as_str()),
                 Cell::from(d.crs.as_str()),
                 Cell::from(d.updated.get(..10).unwrap_or(&d.updated)),
@@ -103,10 +112,11 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let widths = [
-        Constraint::Percentage(45),
-        Constraint::Percentage(25),
+        Constraint::Percentage(40),
+        Constraint::Length(10),
+        Constraint::Percentage(22),
         Constraint::Percentage(12),
-        Constraint::Percentage(18),
+        Constraint::Percentage(14),
     ];
 
     let table = Table::new(rows, widths)
@@ -289,10 +299,16 @@ fn draw_downloads(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let help = match app.view {
-        View::Browse => " / search  s sort  ↑↓/PgUp/PgDn navigate  g/G top/bottom  ⏎ open  q quit",
-        View::Detail => {
-            " space mark  d download  ↑↓/PgUp/PgDn navigate  g/G top/bottom  esc back  q quit"
+    let help = if app.searching {
+        " type to filter  ↑↓ navigate  ⏎/esc accept  ⌥⌫ clear"
+    } else {
+        match app.view {
+            View::Browse => {
+                " / search  s sort  j/k navigate  g/G top/bottom  ⏎ open  R refresh  q quit"
+            }
+            View::Detail => {
+                " space mark  d download  j/k navigate  g/G top/bottom  esc back  q quit"
+            }
         }
     };
 
@@ -309,6 +325,20 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(line).style(Style::default().bg(Color::Black).bold()),
         area,
     );
+}
+
+fn browse_format_color(fmt: &str) -> Color {
+    match fmt {
+        "GML" => Color::Cyan,
+        "SOSI" => Color::Magenta,
+        "GeoJSON" => Color::Yellow,
+        "FGDB" | "GeoPackage" | "PostGIS" => Color::Blue,
+        "Shape" => Color::Green,
+        "TIFF" => Color::Red,
+        "PDF" => Color::Red,
+        "CSV" | "Excel" => Color::White,
+        _ => Color::DarkGray,
+    }
 }
 
 fn type_color(file_type: &str) -> Color {

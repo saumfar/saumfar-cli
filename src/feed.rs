@@ -9,6 +9,7 @@ const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
 #[derive(Debug, Clone)]
 pub struct Dataset {
     pub title: String,
+    pub format: String,
     pub summary: String,
     pub owner: String,
     pub updated: String,
@@ -52,7 +53,8 @@ pub fn parse_service_feed(xml: &str) -> Result<Vec<Dataset>> {
         .children()
         .filter(|n| n.has_tag_name((ATOM_NS, "entry")))
     {
-        let title = child_text(&entry, "title").unwrap_or_default();
+        let raw_title = child_text(&entry, "title").unwrap_or_default();
+        let (title, format) = extract_title_format(&raw_title);
         let summary = child_text(&entry, "summary").unwrap_or_default();
         let owner = child_text(&entry, "rights").unwrap_or_default();
         let updated = child_text(&entry, "updated").unwrap_or_default();
@@ -76,6 +78,7 @@ pub fn parse_service_feed(xml: &str) -> Result<Vec<Dataset>> {
 
         datasets.push(Dataset {
             title,
+            format,
             summary,
             owner,
             updated,
@@ -184,6 +187,44 @@ fn extract_file_type(url: &str, mime: &str) -> String {
         _ if !mime.is_empty() => mime.to_string(),
         _ => String::new(),
     }
+}
+
+const FORMAT_SUFFIXES: &[&str] = &[
+    "FGDB-format",
+    "GeoJSON-format",
+    "GeoPackage-format",
+    "GML-format",
+    "PostGIS-format",
+    "SOSI-format",
+    "CSV-format",
+    "Excel-format",
+    "PDF-format",
+    "TIFF-format",
+    "Shape-format",
+    // Non "-format" patterns
+    "AI-format",
+    "EMF-format",
+    "JPEG-format",
+    "PPTX-format",
+    "PNG-format",
+    "SVG-format",
+];
+
+fn extract_title_format(raw: &str) -> (String, String) {
+    for suffix in FORMAT_SUFFIXES {
+        if let Some(base) = raw.strip_suffix(suffix) {
+            let fmt = suffix.strip_suffix("-format").unwrap_or(suffix);
+            return (base.trim().to_string(), fmt.to_string());
+        }
+    }
+    // Try generic pattern: anything ending in "<WORD>-format"
+    if let Some(pos) = raw.rfind(" ") {
+        let last = &raw[pos + 1..];
+        if let Some(fmt) = last.strip_suffix("-format") {
+            return (raw[..pos].trim().to_string(), fmt.to_string());
+        }
+    }
+    (raw.to_string(), String::new())
 }
 
 fn child_text(node: &roxmltree::Node, tag: &str) -> Option<String> {

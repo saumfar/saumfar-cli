@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 
+use crate::cache;
+
 pub const SERVICE_FEED_URL: &str = "https://nedlasting.geonorge.no/geonorge/Tjenestefeed.xml";
 
 const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
@@ -18,11 +20,16 @@ pub struct Dataset {
 pub struct DownloadEntry {
     pub title: String,
     pub format: String,
+    pub file_type: String,
     pub url: String,
     pub updated: String,
 }
 
 pub async fn fetch_service_feed(client: &reqwest::Client) -> Result<Vec<Dataset>> {
+    if let Some(cached) = cache::read_cached_feed().await {
+        return parse_service_feed(&cached);
+    }
+
     let body = client
         .get(SERVICE_FEED_URL)
         .send()
@@ -31,6 +38,8 @@ pub async fn fetch_service_feed(client: &reqwest::Client) -> Result<Vec<Dataset>
         .text()
         .await
         .context("failed to read service feed body")?;
+
+    let _ = cache::write_cached_feed(&body).await;
     parse_service_feed(&body)
 }
 
@@ -120,15 +129,61 @@ pub fn parse_dataset_feed(xml: &str) -> Result<Vec<DownloadEntry>> {
             .unwrap_or("")
             .to_string();
 
+        let file_type = extract_file_type(&url, &format);
+
         entries.push(DownloadEntry {
             title,
             format,
+            file_type,
             url,
             updated,
         });
     }
 
     Ok(entries)
+}
+
+fn extract_file_type(url: &str, mime: &str) -> String {
+    if let Some(filename) = url.rsplit('/').next() {
+        let name = filename.split('?').next().unwrap_or(filename);
+        if let Some(ext) = name.rsplit('.').next() {
+            let ext_lower = ext.to_lowercase();
+            if matches!(
+                ext_lower.as_str(),
+                "zip"
+                    | "gml"
+                    | "xml"
+                    | "json"
+                    | "geojson"
+                    | "gpkg"
+                    | "shp"
+                    | "tif"
+                    | "tiff"
+                    | "pdf"
+                    | "csv"
+                    | "xlsx"
+                    | "sosi"
+                    | "fgdb"
+                    | "gdb"
+                    | "sql"
+                    | "pmtiles"
+                    | "mbtiles"
+            ) {
+                return ext_lower;
+            }
+        }
+    }
+
+    match mime {
+        m if m.contains("gml") => "gml".to_string(),
+        m if m.contains("json") => "json".to_string(),
+        m if m.contains("xml") => "xml".to_string(),
+        m if m.contains("zip") => "zip".to_string(),
+        m if m.contains("pdf") => "pdf".to_string(),
+        m if m.contains("tiff") => "tiff".to_string(),
+        _ if !mime.is_empty() => mime.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn child_text(node: &roxmltree::Node, tag: &str) -> Option<String> {

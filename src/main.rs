@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod download;
 mod feed;
 mod search;
@@ -44,6 +45,8 @@ enum Command {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Clear the cached service feed
+    ClearCache,
 }
 
 #[tokio::main]
@@ -55,6 +58,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::List { search, owner }) => cmd_list(&client, search, owner).await,
+        Some(Command::ClearCache) => {
+            cache::invalidate().await?;
+            println!("Cache cleared.");
+            Ok(())
+        }
         None => run_tui(&client, &cli.output_dir).await,
     }
 }
@@ -108,23 +116,63 @@ async fn run_tui(client: &reqwest::Client, output_dir: &Path) -> Result<()> {
     app.loading = false;
     app.set_datasets(datasets);
 
+    if let Some(age) = cache::cache_age().await {
+        let mins = age.as_secs() / 60;
+        if mins > 0 {
+            app.status_message = Some(format!("Feed cached {mins}m ago"));
+        }
+    }
+
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| {
+            app.visible_rows = f.area().height.saturating_sub(3);
+            ui::draw(f, &app);
+        })?;
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                break;
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    break;
+                }
+
+                match app.view {
+                    View::Browse => handle_browse_key(&mut app, key, client).await?,
+                    View::Detail => {
+                        handle_detail_key(&mut app, key, client, output_dir).await?;
+                    }
+                }
+
+                if app.should_quit {
+                    break;
+                }
             }
+        }
 
-            match app.view {
-                View::Browse => handle_browse_key(&mut app, key.code, client).await?,
-                View::Detail => handle_detail_key(&mut app, key.code, client, output_dir).await?,
-            }
-
-            if app.should_quit {
-                break;
+        if let Some(ref dl) = app.downloads {
+            let guard = dl.lock().await;
+            if guard.iter().all(|d| d.done) {
+                let errors: Vec<_> = guard
+                    .iter()
+                    .filter_map(|d| d.error.as_ref().cloned())
+                    .collect();
+                let ok_count = guard.len() - errors.len();
+                let total_bytes: u64 = guard
+                    .iter()
+                    .filter(|d| d.error.is_none())
+                    .map(|d| d.bytes_downloaded)
+                    .sum();
+                drop(guard);
+                let size = total_bytes as f64 / 1_048_576.0;
+                if errors.is_empty() {
+                    app.status_message = Some(format!(
+                        "Downloaded {ok_count} file{} ({size:.1} MB)",
+                        if ok_count == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    app.status_message =
+                        Some(format!("{ok_count} downloaded, {} failed", errors.len()));
+                }
+                app.downloads = None;
             }
         }
     }
@@ -134,14 +182,37 @@ async fn run_tui(client: &reqwest::Client, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn handle_browse_key(app: &mut App, key: KeyCode, client: &reqwest::Client) -> Result<()> {
-    match key {
+async fn handle_browse_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    client: &reqwest::Client,
+) -> Result<()> {
+    match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::Char('g') => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.jump_bottom();
+            } else {
+                app.jump_top();
+            }
+        }
+        KeyCode::Home => app.jump_top(),
+        KeyCode::End => app.jump_bottom(),
         KeyCode::Backspace => app.pop_search_char(),
         KeyCode::Esc => app.clear_search(),
+        KeyCode::Char('R') => {
+            app.loading = true;
+            cache::invalidate().await?;
+            let datasets = feed::fetch_service_feed(client).await?;
+            app.loading = false;
+            app.set_datasets(datasets);
+            app.status_message = Some("Feed refreshed".to_string());
+        }
         KeyCode::Enter => {
             if let Some(ds) = app.selected_dataset() {
                 let url = ds.feed_url.clone();
@@ -150,6 +221,7 @@ async fn handle_browse_key(app: &mut App, key: KeyCode, client: &reqwest::Client
                     app.view = View::Detail;
                     app.detail_loading = true;
                     app.detail_selected = 0;
+                    app.detail_marked.clear();
                     app.current_dataset_title = title;
                     match feed::fetch_dataset_feed(client, &url).await {
                         Ok(entries) => {
@@ -173,32 +245,49 @@ async fn handle_browse_key(app: &mut App, key: KeyCode, client: &reqwest::Client
 
 async fn handle_detail_key(
     app: &mut App,
-    key: KeyCode,
+    key: crossterm::event::KeyEvent,
     client: &reqwest::Client,
     output_dir: &Path,
 ) -> Result<()> {
-    match key {
+    match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => {
             app.view = View::Browse;
             app.detail_entries.clear();
+            app.detail_marked.clear();
         }
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::Char('g') => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.jump_bottom();
+            } else {
+                app.jump_top();
+            }
+        }
+        KeyCode::Home => app.jump_top(),
+        KeyCode::End => app.jump_bottom(),
+        KeyCode::Char(' ') => {
+            app.toggle_mark();
+            app.move_selection(1);
+        }
         KeyCode::Char('d') | KeyCode::Enter => {
-            if let Some(entry) = app.selected_download() {
-                let url = entry.url.clone();
-                app.status_message = Some("Downloading…".to_string());
-                match download::download_file(client, &url, output_dir).await {
-                    Ok(progress) => {
-                        let size = progress.bytes_downloaded as f64 / 1_048_576.0;
-                        app.status_message =
-                            Some(format!("Downloaded {} ({:.1} MB)", progress.filename, size));
-                    }
-                    Err(e) => {
-                        app.status_message = Some(format!("Download failed: {e}"));
-                    }
-                }
+            let urls = app.marked_or_selected_urls();
+            if !urls.is_empty() && app.downloads.is_none() {
+                let count = urls.len();
+                app.status_message = Some(format!(
+                    "Downloading {count} file{}…",
+                    if count == 1 { "" } else { "s" }
+                ));
+                let state = download::new_shared_downloads();
+                app.downloads = Some(state.clone());
+                let client = client.clone();
+                let dir = output_dir.to_path_buf();
+                tokio::spawn(async move {
+                    download::download_parallel(&client, urls, &dir, state).await;
+                });
             }
         }
         _ => {}

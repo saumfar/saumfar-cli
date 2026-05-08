@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+use crate::download::SharedDownloads;
 use crate::feed::{Dataset, DownloadEntry};
 use crate::search::FuzzySearch;
 
@@ -24,15 +27,6 @@ impl SortColumn {
             Self::Updated => Self::Title,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Title => "Title",
-            Self::Owner => "Owner",
-            Self::Crs => "CRS",
-            Self::Updated => "Updated",
-        }
-    }
 }
 
 pub struct App {
@@ -44,12 +38,17 @@ pub struct App {
     pub sort_column: SortColumn,
     pub sort_ascending: bool,
     pub search: FuzzySearch,
+    pub visible_rows: u16,
 
     // Detail view
     pub detail_entries: Vec<DownloadEntry>,
     pub detail_selected: usize,
     pub detail_loading: bool,
     pub current_dataset_title: String,
+    pub detail_marked: HashSet<usize>,
+
+    // Downloads
+    pub downloads: Option<SharedDownloads>,
 
     // Status
     pub status_message: Option<String>,
@@ -68,11 +67,15 @@ impl App {
             sort_column: SortColumn::Title,
             sort_ascending: true,
             search: FuzzySearch::new(),
+            visible_rows: 20,
 
             detail_entries: Vec::new(),
             detail_selected: 0,
             detail_loading: false,
             current_dataset_title: String::new(),
+            detail_marked: HashSet::new(),
+
+            downloads: None,
 
             status_message: None,
             loading: false,
@@ -111,24 +114,59 @@ impl App {
         self.apply_filter();
     }
 
-    pub fn move_selection(&mut self, delta: i32) {
+    fn list_len(&self) -> usize {
         match self.view {
-            View::Browse => {
-                let len = self.filtered_indices.len();
-                if len == 0 {
-                    return;
-                }
-                self.selected = (self.selected as i32 + delta).rem_euclid(len as i32) as usize;
-            }
-            View::Detail => {
-                let len = self.detail_entries.len();
-                if len == 0 {
-                    return;
-                }
-                self.detail_selected =
-                    (self.detail_selected as i32 + delta).rem_euclid(len as i32) as usize;
-            }
+            View::Browse => self.filtered_indices.len(),
+            View::Detail => self.detail_entries.len(),
         }
+    }
+
+    fn selected_mut(&mut self) -> &mut usize {
+        match self.view {
+            View::Browse => &mut self.selected,
+            View::Detail => &mut self.detail_selected,
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let sel = self.selected_mut();
+        *sel = (*sel as i32 + delta).rem_euclid(len as i32) as usize;
+    }
+
+    pub fn page_up(&mut self) {
+        let page = self.visible_rows.saturating_sub(2) as usize;
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let sel = self.selected_mut();
+        *sel = sel.saturating_sub(page);
+    }
+
+    pub fn page_down(&mut self) {
+        let page = self.visible_rows.saturating_sub(2) as usize;
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let sel = self.selected_mut();
+        *sel = (*sel + page).min(len - 1);
+    }
+
+    pub fn jump_top(&mut self) {
+        *self.selected_mut() = 0;
+    }
+
+    pub fn jump_bottom(&mut self) {
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        *self.selected_mut() = len - 1;
     }
 
     pub fn selected_dataset(&self) -> Option<&Dataset> {
@@ -139,6 +177,31 @@ impl App {
 
     pub fn selected_download(&self) -> Option<&DownloadEntry> {
         self.detail_entries.get(self.detail_selected)
+    }
+
+    pub fn toggle_mark(&mut self) {
+        if self.view != View::Detail {
+            return;
+        }
+        if self.detail_marked.contains(&self.detail_selected) {
+            self.detail_marked.remove(&self.detail_selected);
+        } else {
+            self.detail_marked.insert(self.detail_selected);
+        }
+    }
+
+    pub fn marked_or_selected_urls(&self) -> Vec<String> {
+        if self.detail_marked.is_empty() {
+            self.selected_download()
+                .map(|e| vec![e.url.clone()])
+                .unwrap_or_default()
+        } else {
+            self.detail_marked
+                .iter()
+                .filter_map(|&i| self.detail_entries.get(i))
+                .map(|e| e.url.clone())
+                .collect()
+        }
     }
 
     pub fn push_search_char(&mut self, c: char) {
